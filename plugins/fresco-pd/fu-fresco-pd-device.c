@@ -49,6 +49,7 @@ fu_fresco_pd_device_transfer_read (FuFrescoPdDevice *self,
 					    0x40, 0x0, offset,
 					    buf, bufsz, &actual_length,
 					    5000, NULL, error)) {
+		g_prefix_error (error, "failed to read from offset 0x%x: ", offset);
 		return FALSE;
 	}
 	if (bufsz != actual_length) {
@@ -87,6 +88,7 @@ fu_fresco_pd_device_transfer_write (FuFrescoPdDevice *self,
 					    0x41, 0x0, offset,
 					    buf, bufsz, &actual_length,
 					    5000, NULL, error)) {
+		g_prefix_error (error, "failed to write offset 0x%x: ", offset);
 		return FALSE;
 	}
 	if (bufsz != actual_length) {
@@ -170,10 +172,11 @@ fu_fresco_pd_device_setup (FuDevice *device, GError **error)
 	g_autofree gchar *version = NULL;
 
 	/* read existing device version */
-	g_warning("SETUP");
 	for (guint i = 0; i < 4; i++) {
-		if (!fu_fresco_pd_device_transfer_read (self, 0x3000 + i, &ver[i], 1, error))
+		if (!fu_fresco_pd_device_transfer_read (self, 0x3000 + i, &ver[i], 1, error)) {
+			g_prefix_error (error, "failed to read device version [%u]: ", i);
 			return FALSE;
+		}
 	}
 	version = fu_fresco_pd_version_from_buf (ver);
 	fu_device_set_version (FU_DEVICE (self), version, FWUPD_VERSION_FORMAT_QUAD);
@@ -230,11 +233,26 @@ fu_fresco_pd_device_prepare_firmware (FuDevice *device,
 static gboolean
 fu_fresco_pd_device_panther_reset_device (FuFrescoPdDevice *self, GError **error)
 {
+	g_autoptr(GError) error_local = NULL;
+
 	g_debug ("resetting target device");
 	fu_device_set_status (FU_DEVICE (self), FWUPD_STATUS_DEVICE_RESTART);
-	//FIXME: do we need to ignore errors because the device reset before
-	//completing the USB transaction?
-	return fu_fresco_pd_device_or_byte (self, 0xA003, 1 << 3, error);
+	fu_device_add_flag (FU_DEVICE (self), FWUPD_DEVICE_FLAG_WAIT_FOR_REPLUG);
+
+	/* ignore when the device reset before completing the transaction */
+	if (!fu_fresco_pd_device_or_byte (self, 0xA003, 1 << 3, &error_local)) {
+		if (g_error_matches (error_local,
+				     G_USB_DEVICE_ERROR,
+				     G_USB_DEVICE_ERROR_FAILED)) {
+			g_debug ("ignoring %s", error_local->message);
+			return TRUE;
+		}
+		g_propagate_prefixed_error (error, g_steal_pointer (&error_local),
+					    "failed to reset device [%i]",
+					    error_local->code);
+		return FALSE;
+	}
+	return TRUE;
 }
 
 static gboolean
@@ -267,12 +285,18 @@ fu_fresco_pd_device_write_firmware (FuDevice *device,
 	 * 0x6C00<bit 1> = b'0
 	 * 0x6C04 = 0x08 */
 	g_debug ("disable MCU, and enable mtp write");
-	if (!fu_fresco_pd_device_and_byte (self, 0xA001, ~(1 << 2), error))
+	if (!fu_fresco_pd_device_and_byte (self, 0xA001, ~(1 << 2), error)) {
+		g_prefix_error (error, "failed to disable MCU bit 2: ");
 		return FALSE;
-	if (!fu_fresco_pd_device_and_byte (self, 0x6C00, ~(1 << 1), error))
+	}
+	if (!fu_fresco_pd_device_and_byte (self, 0x6C00, ~(1 << 1), error)) {
+		g_prefix_error (error, "failed to disable MCU bit 1: ");
 		return FALSE;
-	if (!fu_fresco_pd_device_write_byte (self, 0x6C04, 0x08, error))
+	}
+	if (!fu_fresco_pd_device_write_byte (self, 0x6C04, 0x08, error)) {
+		g_prefix_error (error, "failed to disable MCU: ");
 		return FALSE;
+	}
 
 	/* fill safe code in chip's boot code */
 	fu_device_set_status (device, FWUPD_STATUS_DEVICE_WRITE);
@@ -367,7 +391,7 @@ fu_fresco_pd_device_write_firmware (FuDevice *device,
 	}
 
 	/* reset the device */
-	return fu_fresco_pd_device_panther_reset_device(self, error);
+	return fu_fresco_pd_device_panther_reset_device (self, error);
 }
 
 static void
@@ -376,8 +400,8 @@ fu_fresco_pd_device_init (FuFrescoPdDevice *self)
 	fu_device_add_icon (FU_DEVICE (self), "audio-card");
 	fu_device_add_flag (FU_DEVICE (self), FWUPD_DEVICE_FLAG_UPDATABLE);
 	fu_device_set_protocol (FU_DEVICE (self), "com.frescologic.pd");
-	fu_device_set_install_duration (FU_DEVICE (self), 3); /* seconds, FIXME??? */
-	fu_device_set_remove_delay (FU_DEVICE (self), FU_DEVICE_REMOVE_DELAY_RE_ENUMERATE);
+	fu_device_set_install_duration (FU_DEVICE (self), 15);
+	fu_device_set_remove_delay (FU_DEVICE (self), 20000);
 	fu_device_set_firmware_size_min (FU_DEVICE (self), 0x4230); /* FIXME? */
 }
 
